@@ -7,6 +7,10 @@
 import logging
 import ask_sdk_core.utils as ask_utils
 import os
+import requests
+import calendar
+from datetime import datetime
+from pytz import timezone
 from ask_sdk_s3.adapter import S3Adapter
 s3_adapter = S3Adapter(bucket_name=os.environ["S3_PERSISTENCE_BUCKET"])
 
@@ -20,6 +24,7 @@ from ask_sdk_model import Response
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+
 class LaunchRequestHandler(AbstractRequestHandler):
     """Handler for Skill Launch."""
     def can_handle(self, handler_input):
@@ -29,8 +34,8 @@ class LaunchRequestHandler(AbstractRequestHandler):
 
     def handle(self, handler_input):
         # type: (HandlerInput) -> Response
-        speak_output = "Hello, This is Cake Time. What is your birthday?"
-        reprompt_text = "I was born Nov. 6th, 2014. When were you born? "
+        speak_output = "Hello! This is Cake Time. What is your birthday?"
+        reprompt_text = "I was born Nov. 6th, 2015. When are you born?"
 
         return (
             handler_input.response_builder
@@ -51,18 +56,67 @@ class HasBirthdayLaunchRequestHandler(AbstractRequestHandler):
 
     def handle(self, handler_input):
         attr = handler_input.attributes_manager.persistent_attributes
-        year = attr['year']
+        year = int(attr['year'])
         month = attr['month'] # month is a string, and we need to convert it to a month index later
-        day = attr['day']
+        day = int(attr['day'])
 
-        # TODO:: Use the settings API to get current date and then compute how many days until user’s bday
-        # TODO:: Say happy birthday on the user’s birthday
+        # get device id
+        sys_object = handler_input.request_envelope.context.system
+        device_id = sys_object.device.device_id
 
-        speak_output = "Welcome back it looks like there are X more days until your y-th birthday."
+        # get Alexa Settings API information
+        api_endpoint = sys_object.api_endpoint
+        api_access_token = sys_object.api_access_token
+
+        # construct systems api timezone url
+        url = '{api_endpoint}/v2/devices/{device_id}/settings/System.timeZone'.format(api_endpoint=api_endpoint, device_id=device_id)
+        headers = {'Authorization': 'Bearer ' + api_access_token}
+
+        userTimeZone = ""
+        try:
+	        r = requests.get(url, headers=headers)
+	        res = r.json()
+	        logger.info("Device API result: {}".format(str(res)))
+	        userTimeZone = res
+        except Exception:
+	        handler_input.response_builder.speak("There was a problem connecting to the service")
+	        return handler_input.response_builder.response
+
+        # getting the current date with the time
+        now_time = datetime.now(timezone(userTimeZone))
+
+        # Removing the time from the date because it affects our difference calculation
+        now_date = datetime(now_time.year, now_time.month, now_time.day)
+        current_year = now_time.year
+
+        # getting the next birthday
+        month_as_index = list(calendar.month_abbr).index(month[:3].title())
+        next_birthday = datetime(current_year, month_as_index, day)
+
+        # check if we need to adjust bday by one year
+        if now_date > next_birthday:
+            next_birthday = datetime(
+                current_year + 1,
+                month_as_index,
+                day
+            )
+            current_year += 1
+        # setting the default speak_output to Happy xth Birthday!!
+        # alexa will automatically correct the ordinal for you.
+        # no need to worry about when to use st, th, rd
+        speak_output = "Happy {}th birthday!".format(str(current_year - year))
+        if now_date != next_birthday:
+            diff_days = abs((now_date - next_birthday).days)
+            speak_output = "Welcome back. It looks like there are \
+                            {days} days until your {birthday_num}th\
+                            birthday".format(
+                                days=diff_days,
+                                birthday_num=(current_year-year)
+                            )
+
         handler_input.response_builder.speak(speak_output)
 
         return handler_input.response_builder.response
-
 
 class CaptureBirthdayIntentHandler(AbstractRequestHandler):
     """Handler for Hello World Intent."""
@@ -88,7 +142,7 @@ class CaptureBirthdayIntentHandler(AbstractRequestHandler):
         attributes_manager.persistent_attributes = birthday_attributes
         attributes_manager.save_persistent_attributes()
 
-        speak_output = f"Thanks, I will remember that you were born {month} {day} {year}"
+        speak_output = 'Thanks, I will remember that you were born {month} {day} {year}.'.format(month=month, day=day, year=year)
 
         return (
             handler_input.response_builder
@@ -133,19 +187,6 @@ class CancelOrStopIntentHandler(AbstractRequestHandler):
                 .response
         )
 
-class FallbackIntentHandler(AbstractRequestHandler):
-    """Single handler for Fallback Intent."""
-    def can_handle(self, handler_input):
-        # type: (HandlerInput) -> bool
-        return ask_utils.is_intent_name("AMAZON.FallbackIntent")(handler_input)
-
-    def handle(self, handler_input):
-        # type: (HandlerInput) -> Response
-        logger.info("In FallbackIntentHandler")
-        speech = "Hmm, I'm not sure. You can say Hello or Help. What would you like to do?"
-        reprompt = "I didn't catch that. What can I help you with?"
-
-        return handler_input.response_builder.speak(speech).ask(reprompt).response
 
 class SessionEndedRequestHandler(AbstractRequestHandler):
     """Handler for Session End."""
@@ -218,7 +259,6 @@ sb.add_request_handler(LaunchRequestHandler())
 sb.add_request_handler(CaptureBirthdayIntentHandler())
 sb.add_request_handler(HelpIntentHandler())
 sb.add_request_handler(CancelOrStopIntentHandler())
-sb.add_request_handler(FallbackIntentHandler())
 sb.add_request_handler(SessionEndedRequestHandler())
 sb.add_request_handler(IntentReflectorHandler()) # make sure IntentReflectorHandler is last so it doesn't override your custom intent handlers
 
